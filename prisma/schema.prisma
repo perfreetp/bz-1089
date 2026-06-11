@@ -1,0 +1,258 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                   String              @id @default(uuid())
+  username             String              @unique
+  email                String              @unique
+  passwordHash         String
+  role                 String              @default("PUBLIC")
+  displayName          String?
+  bio                  String?
+  avatarUrl            String?
+  reputation           Int                 @default(0)
+  contributionPoints   Int                 @default(0)
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+
+  sightings            Sighting[]          @relation("UserSightings")
+  analyses             Analysis[]
+  requestedReviews     ReviewRequest[]     @relation("Requester")
+  assignedReviews      ReviewRequest[]     @relation("Reviewer")
+  reviewComments       ReviewComment[]
+  tasksCreated         Task[]              @relation("TaskCreator")
+  tasksAssigned        Task[]              @relation("TaskAssignee")
+  subscriptions        Subscription[]
+  notifications        Notification[]
+  contributions        Contribution[]
+  eventCollaborations  EventCollaborator[]
+}
+
+model Sighting {
+  id                   String             @id @default(uuid())
+  userId               String
+  user                 User               @relation("UserSightings", fields: [userId], references: [id])
+  title                String
+  description          String
+  category             String             @default("OTHER")
+  latitude             Float
+  longitude            Float
+  locationName         String?
+  occurredAt           DateTime
+  durationSeconds      Int?
+  witnessCount         Int                @default(1)
+  weatherConditions    String?
+  isAnonymous          Boolean            @default(false)
+
+  status               String             @default("PENDING")
+  credibilityScore     Float              @default(0)
+  credibilityLevel     String             @default("LOW")
+  isFalsePositive      Boolean            @default(false)
+  contentTier          String             @default("public")
+
+  eventId              String?
+  event                Event?             @relation(fields: [eventId], references: [id])
+  duplicateGroupId     String?
+
+  media                Media[]
+  analyses             Analysis[]
+  reviewRequests       ReviewRequest[]
+  contributions        Contribution[]
+  tags                 SightingTag[]
+  tasks                Task[]
+
+  sourceDuplicateReports    DuplicateReport[] @relation("SourceDuplicate")
+  duplicateOfReports        DuplicateReport[] @relation("DuplicateOf")
+
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  @@index([latitude, longitude])
+  @@index([occurredAt])
+  @@index([status])
+  @@index([credibilityScore])
+}
+
+model Media {
+  id            String   @id @default(uuid())
+  sightingId    String
+  sighting      Sighting @relation(fields: [sightingId], references: [id], onDelete: Cascade)
+  type          String
+  fileName      String
+  mimeType      String
+  fileSize      Int
+  storagePath   String
+  thumbnailPath String?
+  metadata      String?
+  uploadedAt    DateTime @default(now())
+}
+
+model Event {
+  id               String              @id @default(uuid())
+  title            String
+  summary          String?
+  description      String?
+  latitude         Float
+  longitude        Float
+  startedAt        DateTime
+  endedAt          DateTime?
+  credibilityScore Float               @default(0)
+  sightingCount    Int                 @default(0)
+  isResearchTier   String              @default("public")
+
+  sightings        Sighting[]
+  analyses         Analysis[]
+  collaborators    EventCollaborator[]
+  tags             EventTag[]
+  tasks            Task[]
+
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+}
+
+model EventCollaborator {
+  id        String   @id @default(uuid())
+  eventId   String
+  event     Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      String
+  joinedAt  DateTime @default(now())
+  @@unique([eventId, userId])
+}
+
+model Analysis {
+  id         String     @id @default(uuid())
+  sightingId String?
+  sighting   Sighting?  @relation(fields: [sightingId], references: [id])
+  eventId    String?
+  event      Event?     @relation(fields: [eventId], references: [id])
+  userId     String
+  user       User       @relation(fields: [userId], references: [id])
+  content    String
+  confidence Float      @default(0)
+  isResearch Boolean    @default(false)
+  createdAt  DateTime   @default(now())
+}
+
+model DuplicateReport {
+  id                   String    @id @default(uuid())
+  sourceSightingId     String
+  sourceSighting       Sighting  @relation("SourceDuplicate", fields: [sourceSightingId], references: [id], onDelete: Cascade)
+  duplicateSightingId  String
+  duplicateSighting    Sighting  @relation("DuplicateOf", fields: [duplicateSightingId], references: [id], onDelete: Cascade)
+  similarityScore      Float
+  reportedBy           String?
+  reviewedBy           String?
+  resolved             Boolean   @default(false)
+  merged               Boolean   @default(false)
+  reportedAt           DateTime  @default(now())
+  @@index([sourceSightingId, duplicateSightingId])
+}
+
+model ReviewRequest {
+  id             String         @id @default(uuid())
+  sightingId     String
+  sighting       Sighting       @relation(fields: [sightingId], references: [id], onDelete: Cascade)
+  requesterId    String
+  requester      User           @relation("Requester", fields: [requesterId], references: [id])
+  reviewerId     String?
+  reviewer       User?          @relation("Reviewer", fields: [reviewerId], references: [id])
+  status         String         @default("PENDING")
+  priority       String         @default("normal")
+  notes          String?
+  assignedAt     DateTime       @default(now())
+  completedAt    DateTime?
+
+  comments       ReviewComment[]
+}
+
+model ReviewComment {
+  id               String        @id @default(uuid())
+  reviewRequestId  String
+  reviewRequest    ReviewRequest @relation(fields: [reviewRequestId], references: [id], onDelete: Cascade)
+  userId           String
+  user             User          @relation(fields: [userId], references: [id])
+  content          String
+  recommendation   String?
+  createdAt        DateTime      @default(now())
+}
+
+model Task {
+  id          String    @id @default(uuid())
+  title       String
+  description String?
+  eventId     String?
+  event       Event?    @relation(fields: [eventId], references: [id])
+  sightingId  String?
+  sighting    Sighting? @relation(fields: [sightingId], references: [id])
+  creatorId   String
+  creator     User      @relation("TaskCreator", fields: [creatorId], references: [id])
+  assigneeId  String?
+  assignee    User?     @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  status      String    @default("OPEN")
+  priority    String    @default("medium")
+  dueDate     DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+model Subscription {
+  id             String   @id @default(uuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type           String
+  latitude       Float?
+  longitude      Float?
+  radiusKm       Float?
+  regionName     String?
+  minCredibility Float?
+  createdAt      DateTime @default(now())
+}
+
+model Notification {
+  id                 String   @id @default(uuid())
+  userId             String
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type               String
+  title              String
+  message            String
+  relatedSightingId  String?
+  relatedEventId     String?
+  isRead             Boolean  @default(false)
+  createdAt          DateTime @default(now())
+}
+
+model Contribution {
+  id           String    @id @default(uuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id])
+  sightingId   String?
+  sighting     Sighting? @relation(fields: [sightingId], references: [id])
+  actionType   String
+  points       Int       @default(0)
+  createdAt    DateTime  @default(now())
+}
+
+model SightingTag {
+  id         String   @id @default(uuid())
+  sightingId String
+  sighting   Sighting @relation(fields: [sightingId], references: [id], onDelete: Cascade)
+  tag        String
+  @@unique([sightingId, tag])
+}
+
+model EventTag {
+  id      String @id @default(uuid())
+  eventId String
+  event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  tag     String
+  @@unique([eventId, tag])
+}
