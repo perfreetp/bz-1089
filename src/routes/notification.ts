@@ -217,63 +217,87 @@ router.post(
       }
     }
 
-    const uniqueMatches = new Map<string, MatchInfo>();
+    const matchesByUser = new Map<string, MatchInfo[]>();
     for (const m of matches) {
-      if (!uniqueMatches.has(m.userId)) {
-        uniqueMatches.set(m.userId, m);
+      if (m.userId === req.user?.id) continue;
+      if (!matchesByUser.has(m.userId)) {
+        matchesByUser.set(m.userId, []);
       }
+      matchesByUser.get(m.userId)!.push(m);
     }
 
-    const recipients = Array.from(uniqueMatches.values()).filter(
-      (m) => m.userId !== req.user?.id
-    );
+    const totalAlerts = matchesByUser.size;
 
-    if (recipients.length > 0) {
+    if (totalAlerts > 0) {
       const { createBulkNotifications } = await import(
         '../services/notificationService'
       );
-      for (const match of recipients) {
-        const scope =
-          match.matchedType === 'region'
-            ? match.regionName
+      for (const [userId, userMatches] of matchesByUser.entries()) {
+        const hitDescriptions: string[] = [];
+        for (const match of userMatches) {
+          let scope: string;
+          if (match.matchedType === 'region') {
+            scope = match.regionName
               ? `${match.regionName}${
                   match.distanceKm != null
                     ? `(距离约 ${match.distanceKm}km)`
                     : ''
                 }`
-              : '您订阅的区域'
-            : match.matchedType === 'research'
-            ? '研究级预警'
-            : '通用预警';
+              : '您订阅的区域';
+          } else if (match.matchedType === 'research') {
+            scope = '研究级预警';
+          } else {
+            scope = '通用预警';
+          }
 
-        const categoryNote = match.matchedCategory
-          ? ` 分类：${match.matchedCategory}`
-          : '';
-        const credNote = match.minCredibility
-          ? ` (可信度 ≥ ${match.minCredibility})`
-          : '';
+          const categoryNote = match.matchedCategory
+            ? `，分类：${match.matchedCategory}`
+            : '';
+          const credNote = match.minCredibility
+            ? `（可信度 ≥ ${match.minCredibility}）`
+            : '';
+
+          hitDescriptions.push(
+            `【${scope}${credNote}${categoryNote}】`
+          );
+        }
+
+        const uniqueHits = [...new Set(hitDescriptions)];
+        const message =
+          `${uniqueHits.join(' + ')} 发现新线索：${sighting.title}（可信度 ${sighting.credibilityScore}/100，分类：${sighting.category || '未分类'}）`;
 
         await createBulkNotifications({
-          userIds: [match.userId],
+          userIds: [userId],
           type: 'ALERT' as NotificationType,
-          title: '区域预警：新的观测线索',
-          message: `【${scope}${credNote}】${categoryNote} 发现新线索：${sighting.title}（可信度 ${sighting.credibilityScore}/100）`,
+          title:
+            uniqueHits.length > 1
+              ? `多订阅命中预警：新的观测线索（${uniqueHits.length} 条订阅命中）`
+              : '区域预警：新的观测线索',
+          message,
           relatedSightingId: sighting.id,
         });
       }
     }
 
-    res.json({
-      success: true,
-      data: {
-        alertedCount: recipients.length,
-        alertedUsers: recipients.map((r) => ({
-          userId: r.userId,
+    const flatUsers: any[] = [];
+    for (const [userId, userMatches] of matchesByUser.entries()) {
+      flatUsers.push({
+        userId,
+        hitCount: userMatches.length,
+        hits: userMatches.map((r) => ({
           matchedType: r.matchedType,
           regionName: r.regionName,
           distanceKm: r.distanceKm,
           matchedCategory: r.matchedCategory,
         })),
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        alertedCount: totalAlerts,
+        alertedUsers: flatUsers,
       },
     });
   })

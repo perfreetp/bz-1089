@@ -112,7 +112,7 @@ export const filterAnalysesByRole = (
   }
   if (userRole === 'RESEARCHER') {
     return analyses.filter(
-      (a: any) => a.reviewStatus === 'APPROVED' || a.userId === currentUserId
+      (a: any) => a.reviewStatus === 'APPROVED' || a.reviewStatus === 'PENDING' || a.userId === currentUserId
     );
   }
   return analyses;
@@ -121,10 +121,31 @@ export const filterAnalysesByRole = (
 export const getAnalysisVisibilityCounts = (
   analyses: any[],
   userRole?: UserRole
-): { total: number; approved: number; pending: number; research: number } => {
-  const total = analyses.length;
-  const approved = analyses.filter((a: any) => a.reviewStatus === 'APPROVED').length;
-  const pending = analyses.filter((a: any) => a.reviewStatus === 'PENDING').length;
-  const research = analyses.filter((a: any) => a.isResearch).length;
-  return { total, approved, pending, research };
+) => {
+  if (!userRole || userRole === 'PUBLIC') {
+    const visible = analyses.filter(
+      (a: any) => !a.isResearch && a.reviewStatus === 'APPROVED'
+    );
+    return {
+      total: visible.length,
+      approved: visible.length,
+      pending: null,
+      research: null,
+    };
+  }
+  if (userRole === 'RESEARCHER') {
+    return {
+      total: analyses.length,
+      approved: analyses.filter((a: any) => a.reviewStatus === 'APPROVED').length,
+      pending: analyses.filter((a: any) => a.reviewStatus === 'PENDING').length,
+      research: analyses.filter((a: any) => a.isResearch).length,
+    };
+  }
+  return {
+    total: analyses.length,
+    approved: analyses.filter((a: any) => a.reviewStatus === 'APPROVED').length,
+    pending: analyses.filter((a: any) => a.reviewStatus === 'PENDING').length,
+    research: analyses.filter((a: any) => a.isResearch).length,
+    rejected: analyses.filter((a: any) => a.reviewStatus === 'REJECTED').length,
+  };
 };

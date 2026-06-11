@@ -9,6 +9,7 @@ import {
   filterAnalysesByRole,
   getAnalysisVisibilityCounts,
 } from '../middleware/auth';
+import { AppError } from '../middleware/errorHandler';
 import {
   createAnalysisSchema,
   createEventSchema,
@@ -39,13 +40,11 @@ router.post(
     const userRole = req.user!.role;
 
     if (!data.sightingId && !data.eventId) {
-      res.status(400);
-      throw new Error('必须指定观测记录或事件');
+      throw new AppError('必须指定观测记录或事件', 400);
     }
 
     if (data.isResearch && userRole === 'PUBLIC') {
-      res.status(403);
-      throw new Error('公共用户无权添加研究级分析');
+      throw new AppError('公共用户无权添加研究级分析', 403);
     }
 
     const isReviewer =
@@ -126,8 +125,7 @@ router.post(
     });
 
     if (!analysis) {
-      res.status(404);
-      throw new Error('分析结论不存在');
+      throw new AppError('分析结论不存在', 404);
     }
 
     const updated = await prisma.analysis.update({
@@ -191,12 +189,10 @@ router.get(
     });
 
     if (!sighting) {
-      res.status(404);
-      throw new Error('观测记录不存在');
+      throw new AppError('观测记录不存在', 404);
     }
     if (!isResearchTierAllowed(sighting.contentTier, userRole)) {
-      res.status(403);
-      throw new Error('无权访问');
+      throw new AppError('无权访问', 403);
     }
 
     const allAnalyses = await prisma.analysis.findMany({
@@ -222,13 +218,18 @@ router.get(
 
 router.get(
   '/events',
-  protect,
+  optionalAuth,
   asyncHandler(async (req: Request, res: Response) => {
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 20;
     const userRole = req.user?.role;
 
-    const where: any = userRole === 'PUBLIC' ? { isResearchTier: 'public' } : {};
+    let where: any = {};
+    if (!userRole || userRole === 'PUBLIC') {
+      where = { isResearchTier: 'public' };
+    } else if (userRole === 'RESEARCHER') {
+      where = { isResearchTier: { in: ['public', 'research'] } };
+    }
 
     const [events, total] = await Promise.all([
       prisma.event.findMany({
@@ -253,10 +254,18 @@ router.get(
       prisma.event.count({ where }),
     ]);
 
-    const eventsWithCount = events.map((e: any) => ({
-      ...e,
-      sightingCount: e._count.sightings,
-    }));
+    const eventsWithCount = events.map((e: any) => {
+      const maskedTitle =
+        e.isResearchTier === 'public' ||
+        (userRole && userRole !== 'PUBLIC')
+          ? e.title
+          : '【权限受限事件】';
+      return {
+        ...e,
+        title: maskedTitle,
+        sightingCount: e._count.sightings,
+      };
+    });
 
     res.json({
       success: true,
@@ -275,7 +284,7 @@ router.get(
 
 router.get(
   '/events/:id',
-  protect,
+  optionalAuth,
   asyncHandler(async (req: Request, res: Response) => {
     const userRole = req.user?.role;
     const userId = req.user?.id;
@@ -291,6 +300,7 @@ router.get(
             credibilityScore: true,
             credibilityLevel: true,
             status: true,
+            contentTier: true,
             latitude: true,
             longitude: true,
           },
@@ -319,12 +329,10 @@ router.get(
     });
 
     if (!event) {
-      res.status(404);
-      throw new Error('事件不存在');
+      throw new AppError('事件不存在', 404);
     }
     if (!isResearchTierAllowed(event.isResearchTier, userRole)) {
-      res.status(403);
-      throw new Error('无权访问');
+      throw new AppError('无权访问', 403);
     }
 
     const visibleAnalyses = filterAnalysesByRole(
@@ -337,9 +345,38 @@ router.get(
       userRole
     );
 
+    const visibleSightings = event.sightings
+      .filter((s: any) => isResearchTierAllowed(s.contentTier, userRole))
+      .map((s: any) => {
+        const { contentTier, ...rest } = s;
+        return rest;
+      });
+
+    const displayTitle =
+      event.isResearchTier === 'public' ||
+      (userRole && userRole !== 'PUBLIC')
+        ? event.title
+        : '【权限受限事件】';
+
+    const displaySummary =
+      event.isResearchTier === 'public' ||
+      (userRole && userRole !== 'PUBLIC')
+        ? event.summary
+        : '此事件为研究级或专家级内容，需要更高权限才能查看详细信息。';
+
+    const displayDescription =
+      event.isResearchTier === 'public' ||
+      (userRole && userRole !== 'PUBLIC')
+        ? event.description
+        : null;
+
     const eventWithCount = {
       ...event,
-      sightingCount: event.sightings.length,
+      title: displayTitle,
+      summary: displaySummary,
+      description: displayDescription,
+      sightingCount: visibleSightings.length,
+      sightings: visibleSightings,
       analyses: visibleAnalyses,
       analysisMeta: analysisVisibility,
     };
@@ -403,7 +440,7 @@ router.post(
 
 router.get(
   '/events/:id/summary',
-  protect,
+  optionalAuth,
   asyncHandler(async (req: Request, res: Response) => {
     const userRole = req.user?.role;
     const userId = req.user?.id;
@@ -423,6 +460,7 @@ router.get(
             credibilityScore: true,
             credibilityLevel: true,
             status: true,
+            contentTier: true,
             media: true,
           },
         },
@@ -444,8 +482,11 @@ router.get(
     });
 
     if (!event) {
-      res.status(404);
-      throw new Error('事件不存在');
+      throw new AppError('事件不存在', 404);
+    }
+
+    if (!isResearchTierAllowed(event.isResearchTier, userRole)) {
+      throw new AppError('无权访问此分级事件', 403);
     }
 
     const visibleAnalyses = filterAnalysesByRole(
@@ -454,16 +495,22 @@ router.get(
       userId
     );
 
-    const actualSightingCount = event.sightings.length;
+    const visibleSightings = event.sightings.filter((s: any) =>
+      isResearchTierAllowed(s.contentTier, userRole)
+    );
+
+    const actualSightingCount = visibleSightings.length;
 
     const avgCredibility =
       actualSightingCount > 0
-        ? event.sightings.reduce((s, x) => s + x.credibilityScore, 0) /
-          actualSightingCount
+        ? visibleSightings.reduce(
+            (s: number, x: any) => s + x.credibilityScore,
+            0
+          ) / actualSightingCount
         : 0;
 
-    const dates = event.sightings
-      .map((s) => new Date(s.occurredAt).getTime())
+    const dates = visibleSightings
+      .map((s: any) => new Date(s.occurredAt).getTime())
       .sort();
     const timeRange =
       dates.length > 1
@@ -476,18 +523,30 @@ router.get(
           }
         : null;
 
-    const mediaCount = event.sightings.reduce(
+    const mediaCount = visibleSightings.reduce(
       (s: number, x: any) => s + x.media.length,
       0
     );
-    const totalWitnesses = event.sightings.reduce(
+    const totalWitnesses = visibleSightings.reduce(
       (s: number, x: any) => s + x.witnessCount,
       0
     );
 
+    const displayTitle = event.isResearchTier !== 'public'
+      ? userRole && userRole !== 'PUBLIC'
+        ? event.title
+        : '【权限受限事件】'
+      : event.title;
+
+    const displaySummary = event.isResearchTier !== 'public'
+      ? userRole && userRole !== 'PUBLIC'
+        ? event.summary || '（暂无摘要）'
+        : '此事件为研究级或专家级内容，需要更高权限才能查看详细信息。'
+      : event.summary || '（暂无摘要）';
+
     const generatedSummary = `
-【事件摘要】${event.title}
-${event.summary || '（暂无摘要）'}
+【事件摘要】${displayTitle}
+${displaySummary}
 
 【统计】
 - 关联报告数量：${actualSightingCount} 份
@@ -505,7 +564,7 @@ ${timeRange ? `- 时间跨度：${timeRange.durationHours} 小时 (${timeRange.s
       success: true,
       data: {
         eventId: event.id,
-        title: event.title,
+        title: displayTitle,
         generatedSummary,
         stats: {
           sightingCount: actualSightingCount,
