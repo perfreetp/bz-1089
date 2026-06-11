@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import asyncHandler from 'express-async-handler';
 import { prisma } from '../lib/prisma';
 import { config } from '../config';
-import { protect, requireRoles, optionalAuth, UserRole, isResearchTierAllowed } from '../middleware/auth';
+import { protect, requireRoles, optionalAuth, UserRole, isResearchTierAllowed, filterAnalysesByRole, getAnalysisVisibilityCounts } from '../middleware/auth';
 import { createSightingSchema, querySightingsSchema } from '../validations/schemas';
 import { calculateInitialCredibility, calculateCredibilityLevel } from '../utils/credibility';
 import { haversineDistanceKm, isWithinRadius } from '../utils/geolocation';
@@ -246,6 +246,7 @@ router.get(
   optionalAuth,
   asyncHandler(async (req: Request, res: Response) => {
     const userRole = req.user?.role;
+    const userId = req.user?.id;
 
     const sighting = await prisma.sighting.findUnique({
       where: { id: req.params.id },
@@ -282,7 +283,23 @@ router.get(
       throw new Error('无权访问此分级内容');
     }
 
-    res.json({ success: true, data: sighting });
+    const visibleAnalyses = filterAnalysesByRole(
+      sighting.analyses as any[],
+      userRole,
+      userId
+    );
+    const analysisMeta = getAnalysisVisibilityCounts(
+      sighting.analyses as any[],
+      userRole
+    );
+
+    const data = {
+      ...sighting,
+      analyses: visibleAnalyses,
+      analysisMeta,
+    };
+
+    res.json({ success: true, data });
   })
 );
 

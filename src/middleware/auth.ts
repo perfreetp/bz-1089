@@ -97,3 +97,34 @@ export const isResearchTierAllowed = (contentTier: string, userRole?: UserRole):
   }
   return userRole === 'EXPERT' || userRole === 'ADMIN';
 };
+
+export type AnalysisReviewStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
+
+export const filterAnalysesByRole = (
+  analyses: any[],
+  userRole?: UserRole,
+  currentUserId?: string
+): any[] => {
+  if (!userRole || userRole === 'PUBLIC') {
+    return analyses.filter(
+      (a: any) => !a.isResearch && a.reviewStatus === 'APPROVED'
+    );
+  }
+  if (userRole === 'RESEARCHER') {
+    return analyses.filter(
+      (a: any) => a.reviewStatus === 'APPROVED' || a.userId === currentUserId
+    );
+  }
+  return analyses;
+};
+
+export const getAnalysisVisibilityCounts = (
+  analyses: any[],
+  userRole?: UserRole
+): { total: number; approved: number; pending: number; research: number } => {
+  const total = analyses.length;
+  const approved = analyses.filter((a: any) => a.reviewStatus === 'APPROVED').length;
+  const pending = analyses.filter((a: any) => a.reviewStatus === 'PENDING').length;
+  const research = analyses.filter((a: any) => a.isResearch).length;
+  return { total, approved, pending, research };
+};

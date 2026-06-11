@@ -1,8 +1,19 @@
 import { Router, Request, Response } from 'express';
 import asyncHandler from 'express-async-handler';
 import { prisma } from '../lib/prisma';
-import { protect, optionalAuth, isResearchTierAllowed, requireRoles } from '../middleware/auth';
-import { createAnalysisSchema, createEventSchema } from '../validations/schemas';
+import {
+  protect,
+  optionalAuth,
+  isResearchTierAllowed,
+  requireRoles,
+  filterAnalysesByRole,
+  getAnalysisVisibilityCounts,
+} from '../middleware/auth';
+import {
+  createAnalysisSchema,
+  createEventSchema,
+  reviewAnalysisSchema,
+} from '../validations/schemas';
 import {
   calculateCredibilityLevel,
   updateCredibilityOnAnalysis,
@@ -11,7 +22,14 @@ import { addContribution, createNotification } from '../services/notificationSer
 
 const router = Router();
 
-type NotificationType = 'NEW_SIGHTING' | 'REVIEW_REQUESTED' | 'REVIEW_COMPLETED' | 'EVENT_MERGED' | 'ALERT' | 'TASK_ASSIGNED' | 'MISSED_REPORT';
+type NotificationType =
+  | 'NEW_SIGHTING'
+  | 'REVIEW_REQUESTED'
+  | 'REVIEW_COMPLETED'
+  | 'EVENT_MERGED'
+  | 'ALERT'
+  | 'TASK_ASSIGNED'
+  | 'MISSED_REPORT';
 
 router.post(
   '/analyses',
@@ -30,6 +48,11 @@ router.post(
       throw new Error('公共用户无权添加研究级分析');
     }
 
+    const isReviewer =
+      userRole === 'RESEARCHER' ||
+      userRole === 'EXPERT' ||
+      userRole === 'ADMIN';
+
     const analysis = await prisma.analysis.create({
       data: {
         sightingId: data.sightingId,
@@ -38,13 +61,18 @@ router.post(
         content: data.content,
         confidence: data.confidence || 0.5,
         isResearch: data.isResearch || false,
+        reviewStatus: isReviewer ? 'APPROVED' : 'PENDING',
+        reviewedBy: isReviewer ? req.user!.id : null,
+        reviewedAt: isReviewer ? new Date() : null,
       },
       include: {
-        user: { select: { id: true, username: true, displayName: true, role: true } },
+        user: {
+          select: { id: true, username: true, displayName: true, role: true },
+        },
       },
     });
 
-    if (data.sightingId) {
+    if (data.sightingId && isReviewer) {
       const sighting = await prisma.sighting.findUnique({
         where: { id: data.sightingId },
       });
@@ -67,7 +95,8 @@ router.post(
             userId: sighting.userId,
             type: 'NEW_SIGHTING' as NotificationType,
             title: '您的观测记录有新的分析结论',
-            message: '有研究者为您提交的线索添加了分析结论。',
+            message:
+              '有研究者为您提交的线索添加了分析结论。',
             relatedSightingId: data.sightingId,
           });
         }
@@ -85,11 +114,77 @@ router.post(
   })
 );
 
+router.post(
+  '/analyses/:id/review',
+  protect,
+  requireRoles('RESEARCHER', 'EXPERT', 'ADMIN'),
+  asyncHandler(async (req: Request, res: Response) => {
+    const data = reviewAnalysisSchema.parse(req.body);
+
+    const analysis = await prisma.analysis.findUnique({
+      where: { id: req.params.id },
+    });
+
+    if (!analysis) {
+      res.status(404);
+      throw new Error('分析结论不存在');
+    }
+
+    const updated = await prisma.analysis.update({
+      where: { id: req.params.id },
+      data: {
+        reviewStatus: data.approved ? 'APPROVED' : 'REJECTED',
+        reviewedBy: req.user!.id,
+        reviewedAt: new Date(),
+      },
+      include: {
+        user: {
+          select: { id: true, username: true, displayName: true, role: true },
+        },
+      },
+    });
+
+    if (data.approved && analysis.sightingId) {
+      const sighting = await prisma.sighting.findUnique({
+        where: { id: analysis.sightingId },
+      });
+      if (sighting) {
+        const newScore = updateCredibilityOnAnalysis(
+          sighting.credibilityScore,
+          analysis.confidence,
+          true
+        );
+        await prisma.sighting.update({
+          where: { id: analysis.sightingId },
+          data: {
+            credibilityScore: newScore,
+            credibilityLevel: calculateCredibilityLevel(newScore),
+          },
+        });
+      }
+
+      if (analysis.userId !== req.user!.id) {
+        await createNotification({
+          userId: analysis.userId,
+          type: 'REVIEW_COMPLETED' as NotificationType,
+          title: '您提交的分析结论已通过审核',
+          message: '研究者已批准您的分析，已对公众可见。',
+          relatedSightingId: analysis.sightingId,
+        });
+      }
+    }
+
+    res.json({ success: true, data: updated });
+  })
+);
+
 router.get(
   '/sightings/:sightingId/analyses',
   optionalAuth,
   asyncHandler(async (req: Request, res: Response) => {
     const userRole = req.user?.role;
+    const userId = req.user?.id;
+
     const sighting = await prisma.sighting.findUnique({
       where: { id: req.params.sightingId },
       select: { contentTier: true },
@@ -104,18 +199,24 @@ router.get(
       throw new Error('无权访问');
     }
 
-    const analyses = await prisma.analysis.findMany({
-      where: {
-        sightingId: req.params.sightingId,
-        ...(userRole === 'PUBLIC' ? { isResearch: false } : {}),
-      },
+    const allAnalyses = await prisma.analysis.findMany({
+      where: { sightingId: req.params.sightingId },
       include: {
-        user: { select: { id: true, username: true, displayName: true, role: true } },
+        user: {
+          select: { id: true, username: true, displayName: true, role: true },
+        },
       },
       orderBy: { createdAt: 'desc' },
     });
 
-    res.json({ success: true, data: analyses });
+    const visible = filterAnalysesByRole(allAnalyses, userRole, userId);
+    const visibility = getAnalysisVisibilityCounts(allAnalyses, userRole);
+
+    res.json({
+      success: true,
+      data: visible,
+      meta: visibility,
+    });
   })
 );
 
@@ -135,10 +236,16 @@ router.get(
         skip: (page - 1) * limit,
         take: limit,
         include: {
-          _count: { select: { sightings: true, analyses: true, collaborators: true } },
+          _count: {
+            select: { sightings: true, analyses: true, collaborators: true },
+          },
           tags: true,
           collaborators: {
-            include: { user: { select: { id: true, username: true, displayName: true } } },
+            include: {
+              user: {
+                select: { id: true, username: true, displayName: true },
+              },
+            },
           },
         },
         orderBy: { startedAt: 'desc' },
@@ -155,7 +262,12 @@ router.get(
       success: true,
       data: {
         events: eventsWithCount,
-        pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit),
+        },
       },
     });
   })
@@ -166,24 +278,42 @@ router.get(
   protect,
   asyncHandler(async (req: Request, res: Response) => {
     const userRole = req.user?.role;
+    const userId = req.user?.id;
 
     const event = await prisma.event.findUnique({
       where: { id: req.params.id },
       include: {
         sightings: {
           select: {
-            id: true, title: true, occurredAt: true,
-            credibilityScore: true, credibilityLevel: true, status: true,
-            latitude: true, longitude: true,
+            id: true,
+            title: true,
+            occurredAt: true,
+            credibilityScore: true,
+            credibilityLevel: true,
+            status: true,
+            latitude: true,
+            longitude: true,
           },
         },
         analyses: {
-          include: { user: { select: { id: true, username: true, displayName: true, role: true } } },
-          ...(userRole === 'PUBLIC' ? { where: { isResearch: false } } : {}),
+          include: {
+            user: {
+              select: {
+                id: true,
+                username: true,
+                displayName: true,
+                role: true,
+              },
+            },
+          },
         },
         tags: true,
         collaborators: {
-          include: { user: { select: { id: true, username: true, displayName: true, role: true } } },
+          include: {
+            user: {
+              select: { id: true, username: true, displayName: true, role: true },
+            },
+          },
         },
       },
     });
@@ -197,9 +327,21 @@ router.get(
       throw new Error('无权访问');
     }
 
+    const visibleAnalyses = filterAnalysesByRole(
+      event.analyses,
+      userRole,
+      userId
+    );
+    const analysisVisibility = getAnalysisVisibilityCounts(
+      event.analyses,
+      userRole
+    );
+
     const eventWithCount = {
       ...event,
       sightingCount: event.sightings.length,
+      analyses: visibleAnalyses,
+      analysisMeta: analysisVisibility,
     };
 
     res.json({ success: true, data: eventWithCount });
@@ -227,9 +369,7 @@ router.post(
           ? { create: data.tags.map((t: string) => ({ tag: t })) }
           : undefined,
         collaborators: {
-          create: [
-            { userId: req.user!.id, role: 'creator' },
-          ],
+          create: [{ userId: req.user!.id, role: 'creator' }],
         },
       },
       include: { collaborators: true, tags: true },
@@ -249,12 +389,10 @@ router.post(
     const { userId, role = 'collaborator' } = req.body;
 
     const collab = await prisma.eventCollaborator.create({
-      data: {
-        eventId: req.params.id,
-        userId,
-        role,
+      data: { eventId: req.params.id, userId, role },
+      include: {
+        user: { select: { id: true, username: true, displayName: true } },
       },
-      include: { user: { select: { id: true, username: true, displayName: true } } },
     });
 
     await addContribution(userId, 'EVENT_COLLABORATOR', 15);
@@ -267,20 +405,38 @@ router.get(
   '/events/:id/summary',
   protect,
   asyncHandler(async (req: Request, res: Response) => {
+    const userRole = req.user?.role;
+    const userId = req.user?.id;
+
     const event = await prisma.event.findUnique({
       where: { id: req.params.id },
       include: {
         sightings: {
           select: {
-            id: true, title: true, description: true, occurredAt: true,
-            latitude: true, longitude: true,
+            id: true,
+            title: true,
+            description: true,
+            occurredAt: true,
+            latitude: true,
+            longitude: true,
             witnessCount: true,
-            credibilityScore: true, credibilityLevel: true, status: true,
-            media: true, analyses: true,
+            credibilityScore: true,
+            credibilityLevel: true,
+            status: true,
+            media: true,
           },
         },
         analyses: {
-          include: { user: { select: { id: true, username: true, displayName: true, role: true } } },
+          include: {
+            user: {
+              select: {
+                id: true,
+                username: true,
+                displayName: true,
+                role: true,
+              },
+            },
+          },
         },
         collaborators: true,
         tags: true,
@@ -291,6 +447,12 @@ router.get(
       res.status(404);
       throw new Error('事件不存在');
     }
+
+    const visibleAnalyses = filterAnalysesByRole(
+      event.analyses,
+      userRole,
+      userId
+    );
 
     const actualSightingCount = event.sightings.length;
 
@@ -308,15 +470,19 @@ router.get(
         ? {
             start: new Date(dates[0]).toISOString(),
             end: new Date(dates[dates.length - 1]).toISOString(),
-            durationHours: Math.round((dates[dates.length - 1] - dates[0]) / 3600000),
+            durationHours: Math.round(
+              (dates[dates.length - 1] - dates[0]) / 3600000
+            ),
           }
         : null;
 
     const mediaCount = event.sightings.reduce(
-      (s: number, x: any) => s + x.media.length, 0
+      (s: number, x: any) => s + x.media.length,
+      0
     );
     const totalWitnesses = event.sightings.reduce(
-      (s: number, x: any) => s + x.witnessCount, 0
+      (s: number, x: any) => s + x.witnessCount,
+      0
     );
 
     const generatedSummary = `
@@ -329,7 +495,7 @@ ${event.summary || '（暂无摘要）'}
 - 总目击人数：${totalWitnesses} 人
 - 媒体证据：${mediaCount} 份
 - 参与协作：${event.collaborators.length} 人
-- 分析结论：${event.analyses.length} 条
+- 可见分析结论：${visibleAnalyses.length} 条
 ${timeRange ? `- 时间跨度：${timeRange.durationHours} 小时 (${timeRange.start} ~ ${timeRange.end})` : ''}
 
 【标签】${event.tags.map((t: any) => '#' + t.tag).join(' ')}
@@ -347,7 +513,7 @@ ${timeRange ? `- 时间跨度：${timeRange.durationHours} 小时 (${timeRange.s
           totalWitnesses,
           mediaCount,
           collaboratorCount: event.collaborators.length,
-          analysisCount: event.analyses.length,
+          analysisCount: visibleAnalyses.length,
           timeRange,
         },
       },

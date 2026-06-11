@@ -138,6 +138,9 @@ model Analysis {
   content    String
   confidence Float      @default(0)
   isResearch Boolean    @default(false)
+  reviewStatus String   @default("PENDING")
+  reviewedBy String?
+  reviewedAt DateTime?
   createdAt  DateTime   @default(now())
 }
 
@@ -214,6 +217,7 @@ model Subscription {
   radiusKm       Float?
   regionName     String?
   minCredibility Float?
+  categories     String?
   createdAt      DateTime @default(now())
 }
 

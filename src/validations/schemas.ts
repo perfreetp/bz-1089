@@ -64,6 +64,10 @@ export const createAnalysisSchema = z.object({
   isResearch: z.boolean().optional(),
 });
 
+export const reviewAnalysisSchema = z.object({
+  approved: z.boolean(),
+});
+
 export const reportDuplicateSchema = z.object({
   sourceSightingId: z.string(),
   duplicateSightingId: z.string(),
@@ -118,6 +122,7 @@ export const createSubscriptionSchema = z.object({
   radiusKm: z.coerce.number().positive().optional(),
   regionName: z.string().optional(),
   minCredibility: z.coerce.number().min(0).max(100).optional(),
+  categories: z.array(ufoCategoryEnum).optional(),
 });
 
 export const updateUserRoleSchema = z.object({

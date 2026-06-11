@@ -5,9 +5,26 @@ import { protect } from '../middleware/auth';
 import { createSubscriptionSchema } from '../validations/schemas';
 import { isWithinRadius } from '../utils/geolocation';
 
-type NotificationType = 'NEW_SIGHTING' | 'REVIEW_REQUESTED' | 'REVIEW_COMPLETED' | 'EVENT_MERGED' | 'ALERT' | 'TASK_ASSIGNED' | 'MISSED_REPORT';
+type NotificationType =
+  | 'NEW_SIGHTING'
+  | 'REVIEW_REQUESTED'
+  | 'REVIEW_COMPLETED'
+  | 'EVENT_MERGED'
+  | 'ALERT'
+  | 'TASK_ASSIGNED'
+  | 'MISSED_REPORT';
 
 const router = Router();
+
+const parseCategories = (raw?: string | null): string[] => {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return raw.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+};
 
 router.post(
   '/subscriptions',
@@ -29,10 +46,18 @@ router.post(
         radiusKm: data.radiusKm || 25,
         regionName: data.regionName,
         minCredibility: data.minCredibility,
+        categories: data.categories && data.categories.length > 0
+          ? JSON.stringify(data.categories)
+          : null,
       },
     });
 
-    res.status(201).json({ success: true, data: subscription });
+    const exposed = {
+      ...subscription,
+      categories: parseCategories(subscription.categories),
+    };
+
+    res.status(201).json({ success: true, data: exposed });
   })
 );
 
@@ -45,7 +70,12 @@ router.get(
       orderBy: { createdAt: 'desc' },
     });
 
-    res.json({ success: true, data: subscriptions });
+    const exposed = subscriptions.map((s: any) => ({
+      ...s,
+      categories: parseCategories(s.categories),
+    }));
+
+    res.json({ success: true, data: exposed });
   })
 );
 
@@ -89,7 +119,17 @@ router.post(
 
     const subscriptions = await prisma.subscription.findMany();
 
-    const alertUserIds: string[] = [];
+    type MatchInfo = {
+      subscriptionId: string;
+      userId: string;
+      matchedType: string;
+      regionName?: string;
+      distanceKm?: number;
+      matchedCategory?: string;
+      minCredibility?: number;
+    };
+
+    const matches: MatchInfo[] = [];
 
     for (const sub of subscriptions) {
       if (
@@ -99,13 +139,36 @@ router.post(
         continue;
       }
 
+      const subCategories = parseCategories(sub.categories);
+      if (
+        subCategories.length > 0 &&
+        sighting.category &&
+        !subCategories.includes(sighting.category)
+      ) {
+        continue;
+      }
+
       if (sub.type === 'general') {
-        if (!alertUserIds.includes(sub.userId)) alertUserIds.push(sub.userId);
+        matches.push({
+          subscriptionId: sub.id,
+          userId: sub.userId,
+          matchedType: 'general',
+          matchedCategory:
+            subCategories.length > 0 ? subCategories.join('/') : undefined,
+          minCredibility: sub.minCredibility ?? undefined,
+        });
         continue;
       }
 
       if (sub.type === 'research' && req.user?.role !== 'PUBLIC') {
-        if (!alertUserIds.includes(sub.userId)) alertUserIds.push(sub.userId);
+        matches.push({
+          subscriptionId: sub.id,
+          userId: sub.userId,
+          matchedType: 'research',
+          matchedCategory:
+            subCategories.length > 0 ? subCategories.join('/') : undefined,
+          minCredibility: sub.minCredibility ?? undefined,
+        });
         continue;
       }
 
@@ -124,27 +187,94 @@ router.post(
             sub.radiusKm
           )
         ) {
-          if (!alertUserIds.includes(sub.userId)) alertUserIds.push(sub.userId);
+          const distance =
+            sub.latitude != null && sub.longitude != null
+              ? (() => {
+                  const R = 6371;
+                  const dLat = (sighting.latitude - sub.latitude) * Math.PI / 180;
+                  const dLon = (sighting.longitude - sub.longitude) * Math.PI / 180;
+                  const a =
+                    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                    Math.cos(sub.latitude * Math.PI / 180) *
+                      Math.cos(sighting.latitude * Math.PI / 180) *
+                      Math.sin(dLon / 2) *
+                      Math.sin(dLon / 2);
+                  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+                })()
+              : undefined;
+
+          matches.push({
+            subscriptionId: sub.id,
+            userId: sub.userId,
+            matchedType: 'region',
+            regionName: sub.regionName ?? undefined,
+            distanceKm: distance ? parseFloat(distance.toFixed(2)) : undefined,
+            matchedCategory:
+              subCategories.length > 0 ? subCategories.join('/') : undefined,
+            minCredibility: sub.minCredibility ?? undefined,
+          });
         }
       }
     }
 
-    const recipients = alertUserIds.filter((u) => u !== req.user?.id);
+    const uniqueMatches = new Map<string, MatchInfo>();
+    for (const m of matches) {
+      if (!uniqueMatches.has(m.userId)) {
+        uniqueMatches.set(m.userId, m);
+      }
+    }
+
+    const recipients = Array.from(uniqueMatches.values()).filter(
+      (m) => m.userId !== req.user?.id
+    );
 
     if (recipients.length > 0) {
-      const { createBulkNotifications } = await import('../services/notificationService');
-      await createBulkNotifications({
-        userIds: recipients,
-        type: 'ALERT' as NotificationType,
-        title: '区域预警：新的观测线索',
-        message: `您订阅的区域有新的观测报告：${sighting.title}`,
-        relatedSightingId: sighting.id,
-      });
+      const { createBulkNotifications } = await import(
+        '../services/notificationService'
+      );
+      for (const match of recipients) {
+        const scope =
+          match.matchedType === 'region'
+            ? match.regionName
+              ? `${match.regionName}${
+                  match.distanceKm != null
+                    ? `(距离约 ${match.distanceKm}km)`
+                    : ''
+                }`
+              : '您订阅的区域'
+            : match.matchedType === 'research'
+            ? '研究级预警'
+            : '通用预警';
+
+        const categoryNote = match.matchedCategory
+          ? ` 分类：${match.matchedCategory}`
+          : '';
+        const credNote = match.minCredibility
+          ? ` (可信度 ≥ ${match.minCredibility})`
+          : '';
+
+        await createBulkNotifications({
+          userIds: [match.userId],
+          type: 'ALERT' as NotificationType,
+          title: '区域预警：新的观测线索',
+          message: `【${scope}${credNote}】${categoryNote} 发现新线索：${sighting.title}（可信度 ${sighting.credibilityScore}/100）`,
+          relatedSightingId: sighting.id,
+        });
+      }
     }
 
     res.json({
       success: true,
-      data: { alertedCount: recipients.length, alertedUserIds: recipients },
+      data: {
+        alertedCount: recipients.length,
+        alertedUsers: recipients.map((r) => ({
+          userId: r.userId,
+          matchedType: r.matchedType,
+          regionName: r.regionName,
+          distanceKm: r.distanceKm,
+          matchedCategory: r.matchedCategory,
+        })),
+      },
     });
   })
 );
@@ -180,7 +310,12 @@ router.get(
       data: {
         notifications,
         unreadCount,
-        pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit),
+        },
       },
     });
   })
