@@ -90,7 +90,15 @@ router.get(
     const q = querySightingsSchema.parse(req.query);
     const userRole = req.user?.role;
 
+    let contentTierWhere: any = {};
+    if (!userRole || userRole === 'PUBLIC') {
+      contentTierWhere = { contentTier: 'public' };
+    } else if (userRole === 'RESEARCHER') {
+      contentTierWhere = { contentTier: { in: ['public', 'research'] } };
+    }
+
     const where: any = {
+      ...contentTierWhere,
       ...(q.category ? { category: q.category } : {}),
       ...(q.status ? { status: q.status as SightingStatus } : {}),
       ...(q.userId ? { userId: q.userId } : {}),
@@ -127,24 +135,27 @@ router.get(
     const sortField: any =
       q.sortBy === 'credibility' ? 'credibilityScore' : q.sortBy;
 
-    let sightings: any[] = await prisma.sighting.findMany({
-      where,
-      skip: (q.page - 1) * q.limit,
-      take: q.limit,
-      orderBy: { [sortField]: q.sortOrder },
-      include: {
-        tags: true,
-        media: { take: 3 },
-        user: { select: { id: true, username: true, displayName: true } },
-        event: { select: { id: true, title: true } },
-        _count: { select: { analyses: true, reviewRequests: true } },
-      },
-    });
+    const [sightings, total] = await Promise.all([
+      prisma.sighting.findMany({
+        where,
+        skip: (q.page - 1) * q.limit,
+        take: q.limit,
+        orderBy: { [sortField]: q.sortOrder },
+        include: {
+          tags: true,
+          media: { take: 3 },
+          user: { select: { id: true, username: true, displayName: true } },
+          event: { select: { id: true, title: true } },
+          _count: { select: { analyses: true, reviewRequests: true } },
+        },
+      }),
+      prisma.sighting.count({ where }),
+    ]);
 
-    sightings = sightings.filter((s: any) => isResearchTierAllowed(s.contentTier, userRole));
+    let resultSightings = sightings as any[];
 
     if (q.lat && q.lon && q.radiusKm) {
-      sightings = sightings.filter((s: any) =>
+      resultSightings = resultSightings.filter((s: any) =>
         isWithinRadius(
           q.lat!,
           q.lon!,
@@ -153,25 +164,23 @@ router.get(
           q.radiusKm!
         )
       );
-      sightings = sightings.sort((a, b) => {
+      resultSightings = resultSightings.sort((a, b) => {
         const da = haversineDistanceKm(q.lat!, q.lon!, a.latitude, a.longitude);
         const db = haversineDistanceKm(q.lat!, q.lon!, b.latitude, b.longitude);
         return da - db;
       });
     } else if (q.lat && q.lon) {
-      sightings = sightings.sort((a, b) => {
+      resultSightings = resultSightings.sort((a, b) => {
         const da = haversineDistanceKm(q.lat!, q.lon!, a.latitude, a.longitude);
         const db = haversineDistanceKm(q.lat!, q.lon!, b.latitude, b.longitude);
         return da - db;
       });
     }
 
-    const total = await prisma.sighting.count({ where });
-
     res.json({
       success: true,
       data: {
-        sightings,
+        sightings: resultSightings,
         pagination: {
           page: q.page,
           limit: q.limit,
@@ -198,8 +207,16 @@ router.get(
       throw new Error('经纬度参数必须是数字');
     }
 
+    let contentTierWhere: any = {};
+    if (!userRole || userRole === 'PUBLIC') {
+      contentTierWhere = { contentTier: 'public' };
+    } else if (userRole === 'RESEARCHER') {
+      contentTierWhere = { contentTier: { in: ['public', 'research'] } };
+    }
+
     const candidates: any[] = await prisma.sighting.findMany({
       where: {
+        ...contentTierWhere,
         latitude: { gte: lat - 1, lte: lat + 1 },
         longitude: { gte: lon - 1, lte: lon + 1 },
       },
@@ -212,7 +229,6 @@ router.get(
     });
 
     const withDistance = candidates
-      .filter((s: any) => isResearchTierAllowed(s.contentTier, userRole))
       .map((s: any) => ({
         ...s,
         distanceKm: haversineDistanceKm(lat, lon, s.latitude, s.longitude),

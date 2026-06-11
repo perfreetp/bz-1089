@@ -87,15 +87,18 @@ router.post(
       throw new Error('观测记录不存在');
     }
 
-    const subscriptions = await prisma.subscription.findMany({
-      where: {
-        minCredibility: { lte: sighting.credibilityScore },
-      },
-    });
+    const subscriptions = await prisma.subscription.findMany();
 
     const alertUserIds: string[] = [];
 
     for (const sub of subscriptions) {
+      if (
+        sub.minCredibility != null &&
+        sub.minCredibility > sighting.credibilityScore
+      ) {
+        continue;
+      }
+
       if (sub.type === 'general') {
         if (!alertUserIds.includes(sub.userId)) alertUserIds.push(sub.userId);
         continue;

@@ -255,6 +255,7 @@ router.post(
     }
 
     let event: any;
+    let isNewEvent = false;
     if (data.targetEventId) {
       event = await prisma.event.findUnique({ where: { id: data.targetEventId } });
       if (!event) {
@@ -262,6 +263,7 @@ router.post(
         throw new Error('目标事件不存在');
       }
     } else {
+      isNewEvent = true;
       const avgLat =
         (report.sourceSighting.latitude +
           report.duplicateSighting.latitude) / 2;
@@ -313,6 +315,11 @@ router.post(
       }),
     ]);
 
+    const eventUpdateData: any = {};
+    if (!isNewEvent) {
+      eventUpdateData.sightingCount = { increment: 2 };
+    }
+
     await prisma.$transaction([
       prisma.duplicateReport.update({
         where: { id: report.id },
@@ -322,10 +329,14 @@ router.post(
           reviewedBy: req.user!.id,
         },
       }),
-      prisma.event.update({
-        where: { id: event.id },
-        data: { sightingCount: { increment: 2 } },
-      }),
+      ...(Object.keys(eventUpdateData).length > 0
+        ? [
+            prisma.event.update({
+              where: { id: event.id },
+              data: eventUpdateData,
+            }),
+          ]
+        : []),
     ]);
 
     const notifiedUsers = [

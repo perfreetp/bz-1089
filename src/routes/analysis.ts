@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import asyncHandler from 'express-async-handler';
 import { prisma } from '../lib/prisma';
-import { protect, isResearchTierAllowed, requireRoles } from '../middleware/auth';
+import { protect, optionalAuth, isResearchTierAllowed, requireRoles } from '../middleware/auth';
 import { createAnalysisSchema, createEventSchema } from '../validations/schemas';
 import {
   calculateCredibilityLevel,
@@ -86,8 +86,8 @@ router.post(
 );
 
 router.get(
-  '/sighting/:sightingId/analyses',
-  protect,
+  '/sightings/:sightingId/analyses',
+  optionalAuth,
   asyncHandler(async (req: Request, res: Response) => {
     const userRole = req.user?.role;
     const sighting = await prisma.sighting.findUnique({
@@ -146,10 +146,15 @@ router.get(
       prisma.event.count({ where }),
     ]);
 
+    const eventsWithCount = events.map((e: any) => ({
+      ...e,
+      sightingCount: e._count.sightings,
+    }));
+
     res.json({
       success: true,
       data: {
-        events,
+        events: eventsWithCount,
         pagination: { page, limit, total, pages: Math.ceil(total / limit) },
       },
     });
@@ -192,7 +197,12 @@ router.get(
       throw new Error('无权访问');
     }
 
-    res.json({ success: true, data: event });
+    const eventWithCount = {
+      ...event,
+      sightingCount: event.sightings.length,
+    };
+
+    res.json({ success: true, data: eventWithCount });
   })
 );
 
@@ -282,10 +292,12 @@ router.get(
       throw new Error('事件不存在');
     }
 
+    const actualSightingCount = event.sightings.length;
+
     const avgCredibility =
-      event.sightings.length > 0
+      actualSightingCount > 0
         ? event.sightings.reduce((s, x) => s + x.credibilityScore, 0) /
-          event.sightings.length
+          actualSightingCount
         : 0;
 
     const dates = event.sightings
@@ -312,7 +324,7 @@ router.get(
 ${event.summary || '（暂无摘要）'}
 
 【统计】
-- 关联报告数量：${event.sightingCount} 份
+- 关联报告数量：${actualSightingCount} 份
 - 平均可信度：${avgCredibility.toFixed(1)} / 100
 - 总目击人数：${totalWitnesses} 人
 - 媒体证据：${mediaCount} 份
@@ -330,7 +342,7 @@ ${timeRange ? `- 时间跨度：${timeRange.durationHours} 小时 (${timeRange.s
         title: event.title,
         generatedSummary,
         stats: {
-          sightingCount: event.sightingCount,
+          sightingCount: actualSightingCount,
           avgCredibility,
           totalWitnesses,
           mediaCount,
